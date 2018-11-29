@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+LICENSE = "WTFPL", "http://www.wtfpl.net/about"
+VERSION = "TNG.test5"
+DATABASE = "VirtueBrain.sqlite"
+LOGFILE = "VirtueLog.txt"
+
+import logging
+import pickle
+import praw
+import prawcore
+import sys
+
+from datetime import datetime, timedelta
+from math import ceil
+from peewee import SqliteDatabase, Model, CharField, FloatField, ForeignKeyField, IntegerField, TextField, TimestampField
+from time import sleep
+
+CREDENTIALS = pickle.load(open("credentials.pickle", "rb")) # { client_id: "VirtueTron9000",
+                                                            #   client_secret: "🤖🤡🍆💯™", 
+                                                            #   username: "SignalAVirtueToday",
+                                                            #   password: "https://youtu.be/RCVJ7bujnSc" }
+CREDENTIALS["user_agent"] = f"VirtueTron 9000 {VERSION}"
+
+# Set up logging
+log = logging.getLogger("VirtueTron")
+log.setLevel(logging.DEBUG)
+formatter = logging.Formatter(fmt="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y/%m/%d %I:%M:%S%p")
+file_log = logging.FileHandler(filename=LOGFILE, mode="a")
+file_log.setLevel(logging.INFO)
+file_log.setFormatter(formatter)
+log.addHandler(file_log)
+console_log = logging.StreamHandler(stream=sys.stdout)
+console_log.setLevel(logging.DEBUG)
+console_log.setFormatter(formatter)
+log.addHandler(console_log)
+log.info(f"VirtueTron® 9000™ {VERSION} © CrashARuntimeToday@outlook.com")
+
+# Set up database
+db = SqliteDatabase(DATABASE)
+class BaseModel(Model):
+    class Meta:
+        database = db
+
+class User(BaseModel):
+    name = CharField(unique=True)
+    last_seen = TimestampField()
+
+class Subreddit(BaseModel):
+    name = CharField(unique=True)
+    flair = CharField()
+    weight = FloatField()
+
+class Submission(BaseModel):
+    rid = CharField(unique=True)
+    redditor  = ForeignKeyField(User, backref="submissions", null=True)
+    score = IntegerField()
+    subreddit = ForeignKeyField(Subreddit, backref="submissions")
+    timestamp = TimestampField()
+
+class Comment(BaseModel):
+    rid = CharField(unique=True)
+    sub_rid = ForeignKeyField(Submission, backref="comments")
+    redditor = ForeignKeyField(User, backref="comments", null=True)
+    score = IntegerField()                              
+    subreddit = ForeignKeyField(Subreddit, backref="comments")
+    timestamp = TimestampField()
+
+DB_INIT = False
+if DB_INIT:
+    db.create_tables([User, Subreddit, Submission, Comment])
+
+class _VirtueTron:
+    QUICKSCAN_INTERVAL = timedelta(minutes=15)
+    QUICKSCAN_DEPTH = timedelta(hours=2)
+    MEDSCAN_INTERVAL = timedelta(minutes=60)
+    MEDSCAN_DEPTH = timedelta(hours=4)
+    LONGSCAN_INTERVAL = timedelta(days=1)
+    LONGSCAN_DEPTH = timedelta(days=2)
+    DEEPSCAN_INTERVAL = timedelta(days=3)
+    DEEPSCAN_DEPTH = timedelta(days=7)
+    PROBE_INTERVAL = timedelta(days=2)
+    PROBE_DEPTH = 250
+    
+    def __init__(self, credentials):
+        self._reddit = praw.Reddit(**credentials)
+        self._tbp = self._reddit.subreddit("TheBluePill")
+        self.next_deepscan = datetime.now() + self.DEEPSCAN_INTERVAL
+        self.next_longscan = datetime.now() + self.LONGSCAN_INTERVAL
+        self.next_medscan = datetime.now() + self.MEDSCAN_INTERVAL
+        self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
+    
+    def archive_shitpost(self, shitpost):
+        if Comment.get_or_none(rid=shitpost.id):
+            log.info(f"Not archiving comment '{shitpost.id}' -- already archived.'")
+            return
+
+        if shitpost.author:
+            user, created = User.get_or_create(name=shitpost.author.name)
+            if created:
+                log.info(f"New user: '{shitpost.author.name}'")
+        else:
+            log.info(f"Comment (id: {shitpost.id} on submission '{shitpost.submission.title}' is orphaned.")
+            user = None
+
+        subreddit, created = Subreddit.get_or_create(name=shitpost.subreddit.display_name)
+        if created:
+            log.info(f"New subreddit: '{shitpost.subreddit.display_name}'")
+    
+        if shitpost.submission.author:
+            op, created = User.get_or_create(name=shitpost.submission.author)
+            if created:
+                log.info(f"New OP: '{shitpost.submission.author}'")
+        else:
+            log.info(f"Submission '{shitpost.submission.title}' (id: {shitpost.submission.id}) is orphaned.")
+            op = None
+
+        submission = Submission.get_or_none(rid=shitpost.submission.id)
+        if submission is None:
+            submission = Submission.create(rid=shitpost.submission.id, redditor=op, subreddit=subreddit, score=shitpost.submission.score - 1, timestamp=shitpost.submission.created_utc)
+            log.info(f"New submission: '{shitpost.submission.title}' by '{shitpost.submission.author}' in '{shitpost.submission.subreddit.display_name}' (id: '{shitpost.submission.id}')")            
+ 
+        Comment.create(rid=shitpost.id, sub_rid=submission, redditor=user, subreddit=subreddit, score=shitpost.score - 1, timestamp=shitpost.created_utc)
+        log.info(f"New comment by '{shitpost.author}' (id: {shitpost.id}) on submission '{shitpost.submission.title}' in subreddit '{shitpost.subreddit.display_name}' (id: '{shitpost.submission.id}')")
+    
+    def refresh_score(self):
+        mark = datetime.now()
+        if datetime.now() > self.next_deepscan:
+            depth = self.DEEPSCAN_DEPTH
+            self.next_deepscan = datetime.now() + self.DEEPSCAN_INTERVAL
+            self.next_longscan = datetime.now() + self.LONGSCAN_INTERVAL
+            self.next_medscan = datetime.now() + self.MEDSCAN_INTERVAL
+            self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
+        elif datetime.now() > self.next_longscan:
+            depth = self.LONGSCAN_DEPTH
+            self.next_longscan = datetime.now() + self.LONGSCAN_INTERVAL
+            self.next_medscan = datetime.now() + self.MEDSCAN_INTERVAL
+            self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
+        elif datetime.now() > self.next_medscan:
+            depth = self.MEDSCAN_DEPTH
+            self.next_medscan = datetime.now() + self.MEDSCAN_INTERVAL
+            self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
+        else:
+            depth = self.QUICKSCAN_DEPTH
+            self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
+
+        log.info(f"Refreshing comment scores (maximum depth is: {depth}).")
+        heap = Comment.select().where(Comment.timestamp > (datetime.now() - depth)).join(User)
+        for shitpost in heap:
+            new_score = self._reddit.comment(id=shitpost.rid).score - 1
+            if new_score == shitpost.score:
+                log.debug(f"Comment by '{shitpost.redditor.name}' (id: {shitpost.rid}) hasn't changed, still {shitpost.score}.")
+            else:
+                log.debug(f"Comment by '{shitpost.redditor.name}' (id: {shitpost.rid}) changed from {shitpost.score} to {new_score}.")
+                shitpost.score = new_score
+                shitpost.save()
+        log.info(f"{len(heap)} comments score checked in {datetime.now() - mark}.")
+    
+    def probe(self, redditor):
+        mark = datetime.now()
+        for comment in self._reddit.redditor(redditor.name).comments.new(limit=self.PROBE_DEPTH):
+            self.archive_shitpost(comment)
+        try:
+            log.info(f"Stored {self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(redditor.last_seen + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
+        except TypeError:
+            log.info(f"Stored {self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(datetime.now() + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
+
+    def masstag(self, redditor):
+        heap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Subreddit.flair != None, Comment.redditor == redditor)
+        tally = {}
+        for shitpost in heap:
+            try:
+                tally[shitpost.subreddit.flair] += 1
+            except KeyError:
+                tally[shitpost.subreddit.flair] = 1
+        log.debug(f"Score for {redditor.name}")
+        for flair, score in tally.items():
+            log.debug(f"{flair}: {score}")
+        
+    def loop(self):
+        try:
+            for shitpost in self._tbp.stream.comments():
+                if datetime.now() > self.next_quickscan:
+                    self.refresh_score()
+                #if Comment.get_or_none(rid=shitpost.id) is None: # Skip over already seen comments
+                self.archive_shitpost(shitpost)
+                if shitpost.author: # Skip orphaned comments
+                    redditor = User.get_or_none(name=shitpost.author)
+                    if redditor is not None:
+                        if redditor.last_seen is None or datetime.now() > redditor.last_seen + self.PROBE_INTERVAL:
+                            log.info(f"Probing '{shitpost.author}'")
+                            self.probe(redditor)
+                        self.masstag(redditor)
+                        redditor.last_seen = datetime.now()
+                        redditor.save()
+
+ #               else:
+ #                   log.debug(f"Skipping comment: {shitpost.id} by '{shitpost.author}' -- already seen'")
+
+        except prawcore.PrawcoreException:
+            log.warn(":( Something Went Wrong™")
+            return False
+
+VirtueTron = _VirtueTron(CREDENTIALS)
+
+while True:
+    try:
+        if not VirtueTron.loop():
+            sleep(5)
+    except KeyboardInterrupt:
+        break
+    finally:
+        log.info("Shutting down.")
