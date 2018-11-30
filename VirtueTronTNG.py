@@ -43,7 +43,8 @@ class BaseModel(Model):
 
 class User(BaseModel):
     name = CharField(unique=True)
-    last_seen = TimestampField()
+    last_seen = TimestampField(null=True)
+    next_probe = TimestampField(null=True)
 
 class Subreddit(BaseModel):
     name = CharField(unique=True)
@@ -78,7 +79,7 @@ class _VirtueTron:
     LONGSCAN_DEPTH = timedelta(days=2)
     DEEPSCAN_INTERVAL = timedelta(days=3)
     DEEPSCAN_DEPTH = timedelta(days=7)
-    PROBE_INTERVAL = timedelta(days=2)
+    PROBE_INTERVAL = timedelta(days=7)
     PROBE_DEPTH = 250
     
     def __init__(self, credentials):
@@ -144,8 +145,8 @@ class _VirtueTron:
             self.next_quickscan = datetime.now() + self.QUICKSCAN_INTERVAL
 
         log.info(f"Refreshing comment scores (maximum depth is: {depth}).")
-        heap = Comment.select().where(Comment.timestamp > (datetime.now() - depth)).join(User)
-        for shitpost in heap:
+        shitheap = Comment.select().where(Comment.timestamp > (datetime.now() - depth)).join(User)
+        for shitpost in shitheap:
             new_score = self._reddit.comment(id=shitpost.rid).score - 1
             if new_score == shitpost.score:
                 log.debug(f"Comment by '{shitpost.redditor.name}' (id: {shitpost.rid}) hasn't changed, still {shitpost.score}.")
@@ -153,9 +154,9 @@ class _VirtueTron:
                 log.debug(f"Comment by '{shitpost.redditor.name}' (id: {shitpost.rid}) changed from {shitpost.score} to {new_score}.")
                 shitpost.score = new_score
                 shitpost.save()
-        log.info(f"{len(heap)} comments score checked in {datetime.now() - mark}.")
+        log.info(f"{len(shitheap)} comments refreshed in {datetime.now() - mark}.")
     
-    def probe(self, redditor):
+    def probe_redditor(self, redditor):
         mark = datetime.now()
         for comment in self._reddit.redditor(redditor.name).comments.new(limit=self.PROBE_DEPTH):
             self.archive_shitpost(comment)
@@ -164,18 +165,30 @@ class _VirtueTron:
         except TypeError:
             log.info(f"Stored {self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(datetime.now() + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
 
-    def masstag(self, redditor):
-        heap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Subreddit.flair != None, Comment.redditor == redditor)
+    def masstag_redditor(self, redditor):
+        shitheap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Subreddit.flair != None, Comment.redditor == redditor)
         tally = {}
-        for shitpost in heap:
+        score = {}
+        for shitpost in shitheap:
+            assert shitpost.subreddit.weight != 0
             try:
                 tally[shitpost.subreddit.flair] += 1
+                score[shitpost.subreddit.flair] += shitpost.score * shitpost.subreddit.weight
             except KeyError:
                 tally[shitpost.subreddit.flair] = 1
-        log.debug(f"Score for {redditor.name}")
-        for flair, score in tally.items():
-            log.debug(f"{flair}: {score}")
-        
+                score[shitpost.subreddit.flair] = shitpost.score * shitpost.subreddit.weight
+
+        log.debug(f"Results from {len(shitheap)} comments by '{redditor.name}':")
+        for flair in tally.keys():
+            log.debug(f"{flair} -- count: {tally[flair]}, score: {score[flair]}")
+    
+    def score_redditor(self, redditor):
+        shitheap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Comment.redditor == redditor, Subreddit.weight != 0, Comment.score != 0)
+        score = 0
+        for shitpost in shitheap:
+            score += shitpost.score * shitpost.subreddit.weight
+        log.debug(f"Tallied {len(shitheap)} comments by '{redditor.name}', score is {score}.")
+
     def loop(self):
         try:
             for shitpost in self._tbp.stream.comments():
@@ -186,10 +199,12 @@ class _VirtueTron:
                 if shitpost.author: # Skip orphaned comments
                     redditor = User.get_or_none(name=shitpost.author)
                     if redditor is not None:
-                        if redditor.last_seen is None or datetime.now() > redditor.last_seen + self.PROBE_INTERVAL:
+                        if redditor.next_probe is None or datetime.now() > redditor.next_probe + self.PROBE_INTERVAL:
                             log.info(f"Probing '{shitpost.author}'")
-                            self.probe(redditor)
-                        self.masstag(redditor)
+                            self.probe_redditor(redditor)
+                            redditor.next_probe = datetime.now() + self.PROBE_INTERVAL
+                        self.masstag_redditor(redditor)
+                        self.score_redditor(redditor)
                         redditor.last_seen = datetime.now()
                         redditor.save()
 
