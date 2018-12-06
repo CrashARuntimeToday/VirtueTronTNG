@@ -12,7 +12,7 @@ import sys
 
 from datetime import datetime, timedelta
 from math import ceil
-from peewee import SqliteDatabase, Model, CharField, FloatField, ForeignKeyField, IntegerField, TextField, TimestampField
+from peewee import SqliteDatabase, Model, BooleanField, CharField, FloatField, ForeignKeyField, IntegerField, TextField, TimestampField
 from time import sleep
 
 CREDENTIALS = pickle.load(open("credentials.pickle", "rb")) # { client_id: "VirtueTron9000",
@@ -45,11 +45,12 @@ class User(BaseModel):
     name = CharField(unique=True)
     last_seen = TimestampField(null=True)
     next_probe = TimestampField(null=True)
+    ignore = BooleanField(default=False)
 
 class Subreddit(BaseModel):
     name = CharField(unique=True)
-    flair = CharField()
-    weight = FloatField()
+    flair = CharField(default="")
+    weight = FloatField(default=0)
 
 class Submission(BaseModel):
     rid = CharField(unique=True)
@@ -66,9 +67,6 @@ class Comment(BaseModel):
     subreddit = ForeignKeyField(Subreddit, backref="comments")
     timestamp = TimestampField()
 
-DB_INIT = False
-if DB_INIT:
-    db.create_tables([User, Subreddit, Submission, Comment])
 
 class _VirtueTron:
     QUICKSCAN_INTERVAL = timedelta(minutes=15)
@@ -92,36 +90,37 @@ class _VirtueTron:
     
     def archive_shitpost(self, shitpost):
         if Comment.get_or_none(rid=shitpost.id):
-            log.info(f"Not archiving comment '{shitpost.id}' -- already archived.'")
-            return
+            log.debug(f"Not archiving comment '{shitpost.id}' -- already archived.'")
+            return False
 
         if shitpost.author:
             user, created = User.get_or_create(name=shitpost.author.name)
             if created:
                 log.info(f"New user: '{shitpost.author.name}'")
         else:
-            log.info(f"Comment (id: {shitpost.id} on submission '{shitpost.submission.title}' is orphaned.")
+            log.debug(f"Comment (id: {shitpost.id} on submission '{shitpost.submission.title}' is orphaned.")
             user = None
 
         subreddit, created = Subreddit.get_or_create(name=shitpost.subreddit.display_name)
         if created:
-            log.info(f"New subreddit: '{shitpost.subreddit.display_name}'")
+            log.debug(f"New subreddit: '{shitpost.subreddit.display_name}'")
     
         if shitpost.submission.author:
             op, created = User.get_or_create(name=shitpost.submission.author)
             if created:
                 log.info(f"New OP: '{shitpost.submission.author}'")
         else:
-            log.info(f"Submission '{shitpost.submission.title}' (id: {shitpost.submission.id}) is orphaned.")
+            log.debug(f"Submission '{shitpost.submission.title}' (id: {shitpost.submission.id}) is orphaned.")
             op = None
 
         submission = Submission.get_or_none(rid=shitpost.submission.id)
         if submission is None:
             submission = Submission.create(rid=shitpost.submission.id, redditor=op, subreddit=subreddit, score=shitpost.submission.score - 1, timestamp=shitpost.submission.created_utc)
-            log.info(f"New submission: '{shitpost.submission.title}' by '{shitpost.submission.author}' in '{shitpost.submission.subreddit.display_name}' (id: '{shitpost.submission.id}')")            
+            log.debug(f"New submission: '{shitpost.submission.title}' by '{shitpost.submission.author}' in '{shitpost.submission.subreddit.display_name}' (id: '{shitpost.submission.id}')")            
  
         Comment.create(rid=shitpost.id, sub_rid=submission, redditor=user, subreddit=subreddit, score=shitpost.score - 1, timestamp=shitpost.created_utc)
-        log.info(f"New comment by '{shitpost.author}' (id: {shitpost.id}) on submission '{shitpost.submission.title}' in subreddit '{shitpost.subreddit.display_name}' (id: '{shitpost.submission.id}')")
+        log.debug(f"New comment by '{shitpost.author}' (id: {shitpost.id}) on submission '{shitpost.submission.title}' in subreddit '{shitpost.subreddit.display_name}' (id: '{shitpost.submission.id}')")
+        return True
     
     def refresh_score(self):
         mark = datetime.now()
@@ -158,35 +157,45 @@ class _VirtueTron:
     
     def probe_redditor(self, redditor):
         mark = datetime.now()
+        archived = 0
         for comment in self._reddit.redditor(redditor.name).comments.new(limit=self.PROBE_DEPTH):
-            self.archive_shitpost(comment)
+            if self.archive_shitpost(comment):
+                archived += 1
         try:
-            log.info(f"Stored {self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(redditor.last_seen + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
+            log.info(f"Archived {archived}/{self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(redditor.last_seen + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
         except TypeError:
-            log.info(f"Stored {self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(datetime.now() + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
+            log.info(f"Archived {archived}/{self.PROBE_DEPTH} comments from '{redditor.name}' in {datetime.now() - mark}, next probe due on {(datetime.now() + self.PROBE_INTERVAL):%Y/%m/%d %I:%M:%S%p}.")
 
     def masstag_redditor(self, redditor):
-        shitheap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Subreddit.flair != None, Comment.redditor == redditor)
+        shitheap = list(redditor.comments.select().join(Subreddit).where(Subreddit.flair != "", Subreddit.flair != None))
+        shitheap += list(redditor.submissions.select().join(Subreddit).where(Subreddit.flair != "", Subreddit.flair != None))
         tally = {}
-        score = {}
         for shitpost in shitheap:
             assert shitpost.subreddit.weight != 0
             try:
                 tally[shitpost.subreddit.flair] += 1
-                score[shitpost.subreddit.flair] += shitpost.score * shitpost.subreddit.weight
             except KeyError:
                 tally[shitpost.subreddit.flair] = 1
-                score[shitpost.subreddit.flair] = shitpost.score * shitpost.subreddit.weight
 
-        log.debug(f"Results from {len(shitheap)} comments by '{redditor.name}':")
+        log.debug(f"Results from {len(shitheap)} posts by '{redditor.name}':")
         for flair in tally.keys():
-            log.debug(f"{flair} -- count: {tally[flair]}, score: {score[flair]}")
+            log.debug(f"{flair} -- count: {tally[flair]}")
     
-    def score_redditor(self, redditor):
-        shitheap = Comment.select().join(User).switch(Comment).join(Subreddit).where(Comment.redditor == redditor, Subreddit.weight != 0, Comment.score != 0)
+    def subscore_redditor(self, redditor, subreddit):
+        FRESH_THRESHOLD = timedelta(days=2)
+        FRESH_WEIGHT = 2.0
+        OKAY_THRESHOLD = timedelta(days=7)
+        OKAY_WEIGHT = 1.0
+        STALE_THRESHOLD = timedelta(days=14)
+        STALE_WEIGHT = 0.75
+        SUBMISSION_WEIGHT = 1.25
         score = 0
+        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit == subreddit, Comment.score != 0, Comment.timestamp > datetime.now() + FRESH_THRESHOLD)
         for shitpost in shitheap:
-            score += shitpost.score * shitpost.subreddit.weight
+            score += shitpost.score * FRESH_WEIGHT
+        fresh_posts = len(shitheap)
+        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit == subreddit, Comment.score != 0, Comment.timestamp > datetime.now() + FRESH_THRESHOLD)
+    
         log.debug(f"Tallied {len(shitheap)} comments by '{redditor.name}', score is {score}.")
 
     def loop(self):
@@ -199,12 +208,16 @@ class _VirtueTron:
                 if shitpost.author: # Skip orphaned comments
                     redditor = User.get_or_none(name=shitpost.author)
                     if redditor is not None:
+                        if redditor.name == "SnapshillBot":
+                            redditor.ignore = True
+                        else:
+                            redditor.ignore = False
+                            
                         if redditor.next_probe is None or datetime.now() > redditor.next_probe + self.PROBE_INTERVAL:
                             log.info(f"Probing '{shitpost.author}'")
                             self.probe_redditor(redditor)
                             redditor.next_probe = datetime.now() + self.PROBE_INTERVAL
                         self.masstag_redditor(redditor)
-                        self.score_redditor(redditor)
                         redditor.last_seen = datetime.now()
                         redditor.save()
 
