@@ -3,7 +3,7 @@
 
 VirtueTron9000: a Reddit moderation bot for r/TheBluePill (python 3 &amp; praw &amp; also peewee/sqlite now)
 
-JAHR NULL (upcoming plans)
+**JAHR NULL** (upcoming plans)
 
 - All currently banned users unbanned. Custom flair for ex-cons: Kenshiro/"ALREADY DEAD" (counts as vexatious)
 - All currently approved users, custom flair: "JUNIOR COMMISSAR". Approved users cleared, automod rule to modqueue new posts rescinded (or maybe just set to auto-approve after 4 hours of sitting in the queue)
