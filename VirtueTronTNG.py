@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 LICENSE = "WTFPL", "http://www.wtfpl.net/about"
-VERSION = "TNG.test6"
+VERSION = "TNG.test8"
 DATABASE = "VirtueBrain.sqlite"
 LOGFILE = "VirtueLog.txt"
 
@@ -8,11 +8,11 @@ import logging
 import pickle
 import praw
 import prawcore
-import sys
 
 from datetime import datetime, timedelta
 from math import ceil
 from peewee import SqliteDatabase, Model, BooleanField, CharField, FloatField, ForeignKeyField, IntegerField, TextField, TimestampField
+from sys import stdout
 from time import sleep
 
 CREDENTIALS = pickle.load(open("credentials.pickle", "rb")) # { client_id: "VirtueTron9000",
@@ -29,7 +29,7 @@ file_log = logging.FileHandler(filename=LOGFILE, mode="a")
 file_log.setLevel(logging.INFO)
 file_log.setFormatter(formatter)
 log.addHandler(file_log)
-console_log = logging.StreamHandler(stream=sys.stdout)
+console_log = logging.StreamHandler(stream=stdout)
 console_log.setLevel(logging.DEBUG)
 console_log.setFormatter(formatter)
 log.addHandler(console_log)
@@ -172,20 +172,22 @@ class _VirtueTron:
     def subscore_redditor(self, redditor, subreddit):
         #TODO: rewrite this more elegantly
         FRESH_THRESHOLD = timedelta(days=2)
-        FRESH_WEIGHT = 2.0
+        FRESH_WEIGHT = 1.0
         OKAY_THRESHOLD = timedelta(days=7)
         OKAY_WEIGHT = 1.0
         STALE_THRESHOLD = timedelta(days=14)
-        STALE_WEIGHT = 0.75
+        STALE_WEIGHT = 1.0
         SUBMISSION_WEIGHT = 1.25
 
         score = 0
-        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, Comment.timestamp < datetime.now() + FRESH_THRESHOLD)
+        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, Comment.timestamp > datetime.now() - FRESH_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * FRESH_WEIGHT * shitpost.subreddit.weight
         count = len(shitheap)
-        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit.id == subreddit, Submission.score != 0, Submission.timestamp < datetime.now() + FRESH_THRESHOLD)
+        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit.id == subreddit, Submission.score != 0, Submission.timestamp > datetime.now() - FRESH_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * FRESH_WEIGHT * shitpost.subreddit.weight * SUBMISSION_WEIGHT
         count += len(shitheap)
         if count > 0:
@@ -197,13 +199,15 @@ class _VirtueTron:
         total = count
         total_score = avg_score
 
-        score = 0
-        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, datetime.now() + FRESH_THRESHOLD < Comment.timestamp < datetime.now() + OKAY_THRESHOLD)
+        score = 0; count = 0
+        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, Comment.timestamp > datetime.now() - OKAY_THRESHOLD, Comment.timestamp < datetime.now() - FRESH_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * OKAY_WEIGHT * shitpost.subreddit.weight
         count = len(shitheap)
-        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit.id == subreddit, Submission.score != 0, datetime.now() + FRESH_THRESHOLD < Submission.timestamp < datetime.now() + OKAY_THRESHOLD)
+        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit.id == subreddit, Submission.score != 0,  Submission.timestamp > datetime.now() - OKAY_THRESHOLD, Submission.timestamp < datetime.now() - FRESH_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * OKAY_WEIGHT * shitpost.subreddit.weight * SUBMISSION_WEIGHT
         count += len(shitheap)
         if count > 0:
@@ -215,13 +219,15 @@ class _VirtueTron:
         total += count
         total_score += avg_score
 
-        score = 0
-        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, datetime.now() + OKAY_THRESHOLD > Comment.timestamp > datetime.now() + STALE_THRESHOLD)
+        score = 0; count = 0
+        shitheap = redditor.comments.select().join(Subreddit).where(Subreddit.id == subreddit, Comment.score != 0, Comment.timestamp > datetime.now() - STALE_THRESHOLD, Comment.timestamp < datetime.now() - OKAY_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * OKAY_WEIGHT * shitpost.subreddit.weight
         count = len(shitheap)
-        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit == subreddit, Submission.score != 0, datetime.now() + OKAY_THRESHOLD < Submission.timestamp < datetime.now() + STALE_THRESHOLD)
+        shitheap = redditor.submissions.select().join(Subreddit).where(Subreddit == subreddit, Submission.score != 0, Submission.timestamp > datetime.now() - STALE_THRESHOLD, Submission.timestamp < datetime.now() - OKAY_THRESHOLD)
         for shitpost in shitheap:
+            #log.debug(f"Comment {shitpost.id} timestamp {shitpost.timestamp}")
             score += shitpost.score * OKAY_WEIGHT * shitpost.subreddit.weight * SUBMISSION_WEIGHT
         count += len(shitheap)
         if count > 0:
